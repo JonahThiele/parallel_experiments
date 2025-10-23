@@ -126,7 +126,7 @@ int main (int argc, char *argv[])
             {
                 end = n;
             }
-            printf("master send [%d, %d] to worker %d hostname:\n", start, end, (i % (p - 1) + 1), hostname);
+            printf("master send [%d, %d] to worker %d hostname:%s\n", start, end, (i % (p - 1) + 1), hostname);
             work[0] = start;
             work[1] = end;
             MPI_Send(work, 2, MPI_INT, (i % (p - 1)) + 1, WORK, MPI_COMM_WORLD);
