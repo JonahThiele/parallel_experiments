@@ -3,12 +3,13 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+//setup the tags to use
 #define WORK 100
 #define RESULT 101
 #define STOP 102
 #define REQUEST 103
 
-//prime code from last assignment
+//prime code from R1
 int n_primes(int start, int end)
 {
     int primes = 0;
@@ -62,6 +63,8 @@ int main (int argc, char *argv[])
     //worker range
     int work[2];
 
+    //timing 
+    double start, end;
 
     //strtol code reference from here: https://stackoverflow.com/questions/9748393/how-can-i-get-argv-as-int
     if(argc < 3)
@@ -69,41 +72,61 @@ int main (int argc, char *argv[])
         printf("the two required arguments N and CHUNK where not supplied\n");
         return -1;
     }
+    //get n and chunk args
     n = strtol(argv[1], NULL, 10);
     chunk = strtol(argv[2], NULL, 10);
 
+    //chunk can't be zero
     if(chunk < 1)
     {
-        printf("chunk size is too small must be greater than 0");
+        printf("chunk size is too small must be greater than 0\n");
         return -1;
     }
 
+    //n can't be 2
+    if(n < 2)
+    {
+        printf("n is too small it must be greater than 2\n");
+        return -1;
+    }
+
+    //standard MPI setup
     MPI_Init(&argc, &argv);
-    //time main thread 
-    double master_start = MPI_Wtime();
     MPI_Comm_rank(MPI_COMM_WORLD, &id);
     MPI_Comm_size(MPI_COMM_WORLD, &p);
 
+    //using this instead because its more portable https://stackoverflow.com/questions/22174901/gethostname-function-missing-in-openmpi
     //https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man3/MPI_Get_processor_name.3.html#mpi-get-processor-name
     MPI_Get_processor_name(hostname, &len);
 
-    printf("Hostname: %s, rank: %d\n", hostname, id);
+    printf("Hostname: %s, rank: %d, size: %d\n", hostname, id, p);
+    fflush(stdout);
 
-    //use sending protocol instead
+    //use dynamic allocation of work
     if (id == 0)
     {
+        start = MPI_Wtime();
+        printf("N=%d, P=%d, CHUNK=%d\n", n, p, chunk);
+        fflush(stdout);
         int i = 0;
         int workers_working = p - 1;
+        //see if workers are still processing ranges
         while(workers_working > 0)
         {
             MPI_Status status;
             MPI_Recv(&primes, 1, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
             if(status.MPI_TAG == REQUEST)
             {
+                //we still have ranges to work on
                 if(i * chunk < n)
                 {
                     int start = i * chunk + 2;
-                    int end = start + chunk - 1;
+                    int end = start + chunk - 1; //no overlap
+                    //make sure start doesn't come before end
+                    if(start > n) {
+                        break;  
+                    } 
+                    //handle the last chunk
                     if(end > n)
                     {
                         end = n;
@@ -115,13 +138,16 @@ int main (int argc, char *argv[])
                     MPI_Send(work, 2, MPI_INT, status.MPI_SOURCE, WORK, MPI_COMM_WORLD);
                     i++;
                 } else {
+                    //send  STOP because of no more work
                     MPI_Send(work, 2, MPI_INT, status.MPI_SOURCE, STOP, MPI_COMM_WORLD);
                     workers_working--;
                 }
             }else{
+                //sum up the results
                 total_primes += primes;
             }
         }
+        end = MPI_Wtime();
     } else {
         while(true)
         {
@@ -135,15 +161,16 @@ int main (int argc, char *argv[])
                 break;
             }
             primes = n_primes(work[0], work[1]);
+            printf("worker %d: processed [%d..%d] -> %d primes\n",id, work[0], work[1], primes);
+            fflush(stdout);
             MPI_Send(&primes, 1, MPI_INT, 0, RESULT, MPI_COMM_WORLD);
         }
     }
 
-    double master_end = MPI_Wtime();
     //only check when n is really small
     if(id == 0 && n <= 200000)
     {
-        //sequential check 
+        //sequential check same as R1
         int check_primes = 0;
         for(int i = 2; i <= n; i++)
         {
@@ -172,19 +199,20 @@ int main (int argc, char *argv[])
                 }
             }
         }
-
-
-        if(check_primes == total_primes || n > 200000)
+        //handle the works and sequential check not matching
+        if (check_primes != total_primes)
         {
-            printf("Final summary from master:\n");
-            printf("N=%d, P=%d, CHUNK=%d\n", n, p, chunk);
-            printf("total primes = %d\n", total_primes);
-            printf("elapsed time = %fs\n", master_end-master_start);
-            fflush(stdout);
-        }else{
             printf("failed the correctness check -> ERROR <-\n workers: %d seq: %d\n", total_primes, check_primes);
             fflush(stdout);
         }
+    }
+    //summary
+    if(id == 0){
+        printf("Final summary from master:\n");
+        printf("N=%d, P=%d, CHUNK=%d\n", n, p, chunk);
+        printf("total primes = %d\n", total_primes);
+        printf("elapsed time = %fs\n", end-start);
+        fflush(stdout);
     }
     MPI_Finalize();
     return 0;

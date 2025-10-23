@@ -25,4 +25,4 @@ N and CHUNK are integers, that fit within the standard ranges of C integers
 CHUNK is assumed smaller than N
 
 ## primality test method
-the method used is just a naive trial division by 
+the method used is just a naive trial division up to sqrt, but removing any even numbers and handling 2
