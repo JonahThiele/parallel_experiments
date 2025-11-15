@@ -114,7 +114,7 @@ int main (int argc, char *argv[])
     {
         start = MPI_Wtime();
         printf("N=%d, P=%d, CHUNK=%d\n", n, p, chunk);
-        //cylic allocation but allows for lots of idle time
+        //this allows for idle time
         for(int i = 0; i * chunk < n; i++)
         {
             int start = i * chunk + 2;
