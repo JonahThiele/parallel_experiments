@@ -4,6 +4,20 @@
 #include <mpi.h>
 #include <math.h>
 
+//peusdo code for matrix multiplication found here:
+//https://en.wikipedia.org/wiki/Matrix_multiplication_algorithm
+
+//Input: matrices A and B
+    //Let C be a new matrix of the appropriate size
+    //For i from 1 to n:
+        //For j from 1 to p:
+            //Let sum = 0
+            //For k from 1 to m:
+                //Set sum ← sum + Aik × Bkj
+            //Set Cij ← sum
+    //Return C
+
+//implementation of the puesdocode above
 double** matrix_mul(double** A, double** B)
 {
    double ** C = malloc(N*sizeof(double *)); 
@@ -28,192 +42,260 @@ double** matrix_mul(double** A, double** B)
    return C;
 }
 
-// fixed: takes block_dim instead of sqrt(size)
-void matrix_mul_add(double* A, double* B, double* C, int block_dim)
+//required for the cannons implementation and it now handles flattened data
+void matrix_mul_add(double* A, double* B, double* C, int size)
 {
-   for(int i=0; i < block_dim; i++)
+   int n = (int)sqrt(size);
+   for(int i=0; i < n; i++)
    {
-        for(int a=0; a < block_dim; a++)
+        for(int a=0; a < n; a++)
         {
             double sum = 0;
-            for(int b=0; b < block_dim; b++)
+            for(int b=0; b < n; b++)
             {
-                sum += (A[(i * block_dim) + b] * B[(b * block_dim) + a]);
+                sum += (A[(i * n) + b] * B[(b * n) + a]);
             }
-            C[(i * block_dim) + a] += sum;
+            C[(i * n) + a] += sum;
         }
    }
 }
 
-// shift left
-void shift_left(double *A, double *recv, int block_size, int i, int j, int q)
+//this will need to be converted into a usable 2d array however, but not just yet
+//shift left, needs a recv buffer to handle the send and recv
+void shift_left(double *A,  double *recv, int block_size, int i, int j, int q)
 {
-    int left  = i * q + ((j - 1 + q) % q);
-    int right = i * q + ((j + 1) % q);
+    //offset by row amount each process, and then move over to the column based on the which process is being used
+    /*
+    |
+    |---> right and left are just columsn right next to the moving column
+    */
+    int left = i * q + ((j - 1 + q) % q);
+    int right = i * q + ((j + 1) % q);  
 
-    MPI_Sendrecv(A, block_size, MPI_DOUBLE,
-                 left, 0,
-                 recv, block_size, MPI_DOUBLE,
-                 right, 0,
-                 MPI_COMM_WORLD,
-                 MPI_STATUS_IGNORE);
-
-    for (int k = 0; k < block_size; k++)
-        A[k] = recv[k];
+    //covered briefly in the slides and would be more annoying to implement with just sends and recvs
+    MPI_Sendrecv(A, block_size, MPI_DOUBLE, left, 0, recv, block_size, MPI_DOUBLE, right, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    
+    //can't have the same buffer so we have a new one to handle the recv
+    for (int i = 0; i < block_size; i++)
+    {
+      A[i] = recv[i];  
+    }
 }
 
-// shift up
+//shift up same as shift left but with rows now
 void shift_up(double *B, double *recv, int block_size, int i, int j, int q)
 {
+    //ofset by processes because bottom row has to be sent to top
     int above = ((i - 1 + q ) % q) * q + j;
+
+    //this calculation is easier because it just drops one lower
     int below = ((i + 1) % q) * q + j;
 
-    MPI_Sendrecv(B, block_size, MPI_DOUBLE,
-                 above, 0,
-                 recv, block_size, MPI_DOUBLE,
-                 below, 0,
-                 MPI_COMM_WORLD,
-                 MPI_STATUS_IGNORE);
+    MPI_Sendrecv(B, block_size, MPI_DOUBLE, above, 0, recv, block_size, MPI_DOUBLE, below, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-    for(int k = 0; k < block_size; k++)
-        B[k] = recv[k];
+    for(int i = 0; i < block_size; i++)
+    {
+        B[i] = recv[i];
+    }
+
 }
 
 int main(int argc, char *argv[])
 {
-    int id, p, len, q;
+    //MPI variables
+    int id, p, len, q, rows, cols;
     char hostname[300];
+    
+    //set seed so runs are predictable
+    srand(5050);
 
+    //standard setup for MPI programs
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &id);
     MPI_Comm_size(MPI_COMM_WORLD, &p);
 
-    q = (int)sqrt(p);
+    q=(int)sqrt(p);
 
-    if(q*q != p) {
-        if(id == 0) printf("ERROR: p must be a perfect square.\n");
-        MPI_Finalize();
-        return 1;
+    //local arrays for each process
+    double * local_A = malloc((N/q)*(N/q)*sizeof(double));
+    double * local_B = malloc((N/q)*(N/q)*sizeof(double));
+    double * local_C = malloc((N/q)*(N/q)*sizeof(double));
+    for (int i = 0; i < (N/q)*(N/q); i++)
+    {
+        local_C[i] = 0.0;
     }
 
-    int block_dim  = N / q;          // ✓ safe
-    int block_size = block_dim * block_dim;
+    //collect array for root
+    double *collect_C;
+    double * A;
+    double * B;
 
-    double *local_A = malloc(block_size * sizeof(double));
-    double *local_B = malloc(block_size * sizeof(double));
-    double *local_C = malloc(block_size * sizeof(double));
-
-    for(int i = 0; i < block_size; i++)
-        local_C[i] = 0.0;
-
-    double *collect_C = NULL;
-    double *A = NULL;
-    double *B = NULL;
-
+    //https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man3/MPI_Get_processor_name.3.html#mpi-get-processor-name
     MPI_Get_processor_name(hostname, &len);
     printf("Hostname: %s, rank: %d, size: %d\n", hostname, id, p);
     fflush(stdout);
 
-    int row = id / q;
-    int col = id % q;
+    //setting up i, j so we can do the other operations later
 
+    rows = id / q;
+    cols = id % q;
+
+    //what the root allocates blocks via connon's method, handling 2d blocks, but we need to work with them flattened first
+    //https://en.wikipedia.org/wiki/Cannon%27s_algorithm
     if(id == 0)
     {
         A = malloc(N*N*sizeof(double));
         B = malloc(N*N*sizeof(double));
-
-        for(int i = 0; i < N*N; i++) {
-            A[i] = rand() % MAX_RAND;
-            B[i] = rand() % MAX_RAND;
-        }
-
-        double *send_A = malloc(p * block_size * sizeof(double));
-        double *send_B = malloc(p * block_size * sizeof(double));
-
-        for(int r = 0; r < q; r++)
+        //setup the matrixes 
+        for(int i = 0; i < N; i++)
         {
-            for(int c = 0; c < q; c++)
+            for(int a = 0; a < N; a++)
             {
-                int rank = r*q + c;
-                int offset = rank * block_size;
-
-                for(int i = 0; i < block_dim; i++)
-                    for(int j = 0; j < block_dim; j++)
-                    {
-                        send_A[offset + i*block_dim + j] =
-                            A[(r*block_dim + i)*N + (c*block_dim + j)];
-
-                        send_B[offset + i*block_dim + j] =
-                            B[(r*block_dim + i)*N + (c*block_dim + j)];
-                    }
+                A[(i * N) + a] = (double)(rand() % MAX_RAND);
+                B[(i * N) + a] = (double)(rand() % MAX_RAND);
             }
         }
 
-        MPI_Scatter(send_A, block_size, MPI_DOUBLE,
-                    local_A, block_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        double *send_A = malloc(p * (N/q) * (N/q) * sizeof(double));
+        double *send_B = malloc(p * (N/q) * (N/q) * sizeof(double));
 
-        MPI_Scatter(send_B, block_size, MPI_DOUBLE,
-                    local_B, block_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-        free(send_A);
-        free(send_B);
+        //give out sections of the matrices
+        for(int i = 0; i < q; i++)
+        {
+            for(int a = 0; a < q; a++)
+            {
+                int rank = i * q + a;
+                int element = rank * (N/q) * (N/q);
+
+                int block_size = (N/q) * (N/q);
+
+                for(int b = 0; b < N/q; b++)
+                {
+                    for(int d = 0; d < N/q; d++)
+                    {
+                        send_A[element + b *(N/q) + d] = A[(i*(N/q)+b)*N + (a*(N/q)+d)];
+                        send_B[element + b *(N/q) + d] = B[(i*(N/q)+b)*N + (a*(N/q)+d)];
+                    }
+                }
+                
+            }
+        }
+
+         //send to the specificed process
+                MPI_Scatter(send_A, (N/q) * (N/q), MPI_DOUBLE, local_A, (N/q) * (N/q), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                MPI_Scatter(send_B, (N/q) * (N/q), MPI_DOUBLE, local_B, (N/q) * (N/q), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+            
+                free(send_A);
+                free(send_B);
+    } else {
+        MPI_Scatter(NULL, (N/q)*(N/q), MPI_DOUBLE, local_A, (N/q)*(N/q), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+        MPI_Scatter(NULL, (N/q)*(N/q), MPI_DOUBLE, local_B, (N/q)*(N/q), MPI_DOUBLE, 0, MPI_COMM_WORLD);
     }
-    else {
-        MPI_Scatter(NULL, block_size, MPI_DOUBLE,
-                    local_A, block_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-        MPI_Scatter(NULL, block_size, MPI_DOUBLE,
-                    local_B, block_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    //Shift A(i,j) left by i positions (mod q)
+    double *recv = malloc((N/q) * (N/q) * sizeof(double));
+    for(int r = 0; r < rows; r++)
+    {
+        shift_left(local_A,recv, (N/q)*(N/q), rows, cols, q);
     }
 
-    double *recv = malloc(block_size * sizeof(double));
+    //Shift B(i,j) up by j positions (mod q)
+    for(int c = 0; c < cols; c++)
+    {
+        shift_up(local_B, recv, (N/q)*(N/q), rows, cols, q);
+    }
 
-    // Initial Cannon shifts
-    for(int r = 0; r < row; r++)
-        shift_left(local_A, recv, block_size, row, col, q);
+    // Step 2: Compute
+    //Cij = 0 already handled by the zeroed out 2d C array
 
-    for(int c = 0; c < col; c++)
-        shift_up(local_B, recv, block_size, row, col, q);
-
+    //the meat and potatoes of the program/the parallel section we need to time
     double start = MPI_Wtime();
-
     for(int k = 0; k < q; k++)
     {
-        matrix_mul_add(local_A, local_B, local_C, block_dim);
+        matrix_mul_add(local_A, local_B, local_C, (N/q)*(N/q));   // Local block multiplication how do we accumulate this
 
-        shift_left(local_A, recv, block_size, row, col, q);
-        shift_up(local_B, recv, block_size, row, col, q);
+        shift_left(local_A, recv, (N/q)*(N/q), rows, cols, q);
+        shift_up(local_B, recv, (N/q)*(N/q), rows, cols, q);
     }
-
     double end = MPI_Wtime();
 
     free(recv);
 
     if(id == 0)
+    {
+        //initialize the C_local array
         collect_C = malloc(N*N*sizeof(double));
+    }
+    // Step 3: Gather results if needed Assemble C from all Cij blocks
+    MPI_Gather(local_C, (N/q)*(N/q), MPI_DOUBLE, collect_C, (N/q)*(N/q), MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    MPI_Barrier(MPI_COMM_WORLD);
 
-    MPI_Gather(local_C, block_size, MPI_DOUBLE,
-               collect_C, block_size, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
+    free(local_C);
     free(local_A);
     free(local_B);
-    free(local_C);
 
     if(id == 0)
     {
-        double checksum = 0.0;
-        for(int i = 0; i < N*N; i++)
-            checksum += collect_C[i];
+        //For small values of N create a sequential run and then compare checksum
 
-        printf("parallel check sum: %f\n", checksum);
-        printf("Time Elapsed: %f seconds\n", end-start);
-        fflush(stdout);
+        double checksum_para = 0.0;
+        for (int i = 0; i < N*N; i++) {
+            checksum_para += collect_C[i];
+        }
 
         free(collect_C);
-        free(A);
-        free(B);
-    }
 
+        if(N < 200)
+        {
+            //convert to 2d array to run the check on it
+            double **A2 = malloc(N * sizeof(double*));
+            double **B2 = malloc(N * sizeof(double*));
+            for (int i = 0; i < N; i++)
+            {
+                A2[i] = malloc(N * sizeof(double));
+                B2[i] = malloc(N * sizeof(double));
+            }
+            for(int a = 0; a < N; a++)
+            {
+              for (int j = 0; j < N; j++)
+                {
+                    A2[a][j] = A[a*N + j];
+                    B2[a][j] = B[a*N + j];
+                }
+            }
+
+            double** C_check = matrix_mul(A2, B2);
+        
+            double checksum_seq = 0.0;
+
+            for (int i = 0; i < N; i++) {
+                for (int j = 0; j < N; j++) {
+                    checksum_seq += C_check[i][j];
+                }
+            }
+
+            if(checksum_seq == checksum_para)
+            {
+                printf("check sum passed same as sequential version\n");
+            }
+            
+            for (int i = 0; i < N; i++) {
+                free(A2[i]);
+                free(B2[i]);
+            }
+            free(A2);
+            free(B2);
+            free(A);
+            free(B);
+
+        }
+
+        printf("parallel check sum: %f\n", checksum_para);
+        printf("Time Elasped: %f seconds\n", end-start);
+        
+    }
     MPI_Finalize();
     return 0;
 }
