@@ -3,7 +3,7 @@
 #include "stdio.h"
 #include "omp.h"
 
-double** matrix_mul(double** A, double** B)
+double** matrix_mul(double** A, double** B, int N)
 {
    double ** C = malloc(N*sizeof(double *)); 
    for(int i=0; i< N; i++)
@@ -88,7 +88,7 @@ int main(int argc, char* argv[])
 
     //check sum stuff
 
-    double** C_check = matrix_mul(A, B);    
+    double** C_check = matrix_mul(A, B, N);    
     double checksum_seq = 0.0;
     double checksum_para = 0.0;
 
