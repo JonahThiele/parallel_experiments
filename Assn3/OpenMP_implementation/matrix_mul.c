@@ -75,8 +75,8 @@ int main(int argc, char* argv[])
     }
 
     double start = omp_get_wtime();
-    //#pragma omp parallel for schedule(static, 4)
-    #pragma omp parallel for schedule(dynamic, 4)
+    //#pragma omp parallel for schedule(dynamic, 4)
+    #pragma omp parallel for schedule(static, 10)
     for(int i = 0; i < N; i++)
     {
         for(int k = 0; k < N; k++)
