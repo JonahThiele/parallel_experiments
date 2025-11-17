@@ -114,6 +114,11 @@ int main(int argc, char *argv[])
     MPI_Comm_rank(MPI_COMM_WORLD, &id);
     MPI_Comm_size(MPI_COMM_WORLD, &p);
 
+    //https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man3/MPI_Get_processor_name.3.html#mpi-get-processor-name
+    MPI_Get_processor_name(hostname, &len);
+    printf("Hostname: %s, rank: %d, size: %d\n", hostname, id, p);
+    fflush(stdout);
+
     q=(int)sqrt(p);
 
     //local arrays for each process
@@ -129,12 +134,6 @@ int main(int argc, char *argv[])
     double *collect_C;
     double * A;
     double * B;
-
-    //https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man3/MPI_Get_processor_name.3.html#mpi-get-processor-name
-    MPI_Get_processor_name(hostname, &len);
-    printf("Hostname: %s, rank: %d, size: %d\n", hostname, id, p);
-    fflush(stdout);
-
     //setting up i, j so we can do the other operations later
 
     rows = id / q;
