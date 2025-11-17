@@ -64,26 +64,20 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    //https://docs.open-mpi.org/en/v5.0.x/man-openmpi/man3/MPI_Get_processor_name.3.html#mpi-get-processor-name
     MPI_Get_processor_name(hostname, &len);
     printf("Hostname: %s, rank: %d, size: %d\n", hostname, id, p);
     fflush(stdout);
 
-    //matrix is N * N
     int N = atoi(argv[1]);
-
     int rows = N / p;
     int remainder = N % p;
-
     int local_rows = rows;
-    //if the processes don't divide the rows evenly just the leftovers to root
-    //though about cyclic allocation, but couldn't get it to work with gather and scatter
+
     if(id == 0 && remainder > 0)
     {
         local_rows += remainder;
     }
 
-    //used a flatten array because it would be easier to pass with MPI functions
     double *local_A = malloc(local_rows * N * sizeof(double));
     double *local_C = malloc(local_rows * N * sizeof(double));
     double *B = malloc(N*N*sizeof(double));
@@ -93,15 +87,12 @@ int main(int argc, char* argv[])
     double *A = NULL;
     double *C = NULL;
 
-    //fill in and scatter the 
     if(id == 0)
     {
         A = malloc(N*N*sizeof(double));
         C = malloc(N*N*sizeof(double));
-        //create the offset arrays
         handle_remainder_A = malloc((N - remainder)*N*sizeof(double));
         handle_remainder_C = malloc((N - remainder)*N*sizeof(double));
-        //reproducable seed for random
         srand(5050);
         for(int i = 0; i < N*N; i++)
         {
@@ -110,8 +101,6 @@ int main(int argc, char* argv[])
             C[i] = 0;
         }
 
-        //handle the remainder using a new array so that the scatter and gather calls work
-        //just offset by remainder the new remainder array
         for(int i = 0; i < N - remainder; i++)
         {
             for(int a = 0; a < N; a++)
@@ -125,81 +114,89 @@ int main(int argc, char* argv[])
     // give B to all processes
     MPI_Bcast(B, N*N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // give each process some rows 
-    MPI_Scatter(handle_remainder_A, rows*N, MPI_DOUBLE, local_A, rows*N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    // distribute rows using MPI_Send / MPI_Recv
+    if(id == 0)
+    {
+        // root keeps its own local_A
+        for(int i = 0; i < local_rows; i++)
+            for(int j = 0; j < N; j++)
+                local_A[i*N + j] = handle_remainder_A[i*N + j];
 
-    //the meat and potates of the code mulitplying the copy of B on each processor with the local rows of A 
+        // send chunks to other processes
+        for(int i = 1; i < p; i++)
+        {
+            MPI_Send(handle_remainder_A + i*rows*N, rows*N, MPI_DOUBLE, i, 0, MPI_COMM_WORLD);
+        }
+    }
+    else
+    {
+        MPI_Recv(local_A, rows*N, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
+
     double start = MPI_Wtime();
     matrix_mul_flat(local_A, B, local_C, N, local_rows);
     double end = MPI_Wtime();
 
-    //handle the remainder rows on zero
-    if (id == 0 && remainder > 0) 
+    // handle remainder rows on root
+    if (id == 0 && remainder > 0)
     {
-        matrix_mul_flat(A, B, C, N, remainder); // compute remainder rows on the actual matrix
+        matrix_mul_flat(A, B, C, N, remainder);
     }
 
-    // gather all the results from the local computations onto the root process
-    MPI_Gather(local_C, rows*N, MPI_DOUBLE, handle_remainder_C, rows*N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-    //checksum and smaller values check 
+    // gather results using MPI_Send / MPI_Recv
     if(id == 0)
     {
-        //add the remainder to the C matrix
+        // copy root's results
+        for(int i = 0; i < local_rows; i++)
+            for(int j = 0; j < N; j++)
+                handle_remainder_C[i*N + j] = local_C[i*N + j];
+
+        // receive from other processes
+        for(int i = 1; i < p; i++)
+        {
+            MPI_Recv(handle_remainder_C + i*rows*N, rows*N, MPI_DOUBLE, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    }
+    else
+    {
+        MPI_Send(local_C, rows*N, MPI_DOUBLE, 0, 1, MPI_COMM_WORLD);
+    }
+
+    // combine results
+    if(id == 0)
+    {
         for(int i = 0; i < N - remainder; i++)
-        {
             for(int a = 0; a < N; a++)
-            {
-                C[(i + remainder) * N + a] = handle_remainder_C[i * N + a];
-            }
-        }
+                C[(i + remainder)*N + a] = handle_remainder_C[i*N + a];
 
-        //get the checksum
         double checksum_para = 0;
-        for(int i = 0; i < N*N; i++)
-        {
-            checksum_para += C[i];
-        }
+        for(int i = 0; i < N*N; i++) checksum_para += C[i];
 
-        // for small values of N check against the standard matrix multiplication program
-        if( N < 200)
+        if(N < 200)
         {
-            //new 2d arrays to hold everything for the smaller checks
-            double ** A_test = malloc(N*sizeof(double*));
-            double ** B_test = malloc(N*sizeof(double*));
-
+            double **A_test = malloc(N*sizeof(double*));
+            double **B_test = malloc(N*sizeof(double*));
             for(int i = 0; i < N; i++)
             {
                 A_test[i] = malloc(N*sizeof(double));
                 B_test[i] = malloc(N*sizeof(double));
             }
 
-            //copy over the values for A and B
             for(int i = 0; i < N; i++)
-            {
                 for(int a = 0; a < N; a++)
                 {
-                    A_test[i][a] = A[(i * N) + a];
-                    B_test[i][a] = B[(i * N) + a];
+                    A_test[i][a] = A[i*N + a];
+                    B_test[i][a] = B[i*N + a];
                 }
-            }
 
             double **C_test = matrix_mul(A_test, B_test, N);
-
             double checksum_seq = 0;
-            
             for(int i = 0; i < N; i++)
-            {
                 for(int a = 0; a < N; a++)
-                {
                     checksum_seq += C_test[i][a];
-                }
-            }
 
             if(checksum_para != checksum_seq)
-            {
                 printf("Checksum failed! the two matrices are not equal\n");
-            }
 
             printf("Checksum sequential: %f\n", checksum_seq);
         }
