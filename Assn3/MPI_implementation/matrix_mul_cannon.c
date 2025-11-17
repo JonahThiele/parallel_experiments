@@ -118,6 +118,7 @@ int main(int argc, char *argv[])
     MPI_Get_processor_name(hostname, &len);
     printf("Hostname: %s, rank: %d, size: %d\n", hostname, id, p);
     fflush(stdout);
+    MPI_Barrier(MPI_COMM_WORLD);
 
     q=(int)sqrt(p);
 
