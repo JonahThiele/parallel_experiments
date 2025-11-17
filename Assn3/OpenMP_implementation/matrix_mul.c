@@ -34,7 +34,7 @@ int main(int argc, char* argv[])
 {
     if(argc < 3)
     {
-        printf("add N and number of threads", argv[0]);
+        printf("add N and number of threads");
         return -1;
     }
 
