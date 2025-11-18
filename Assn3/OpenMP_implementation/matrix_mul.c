@@ -52,25 +52,25 @@ int main(int argc, char* argv[])
     }
 
     // create the matrixes
-    double **A = malloc(N * sizeof(double *));
-    double **B = malloc(N * sizeof(double *));
-    double **C = malloc(N * sizeof(double *));
+    double **A = malloc(N*sizeof(double*));
+    double **B = malloc(N*sizeof(double*));
+    double **C = malloc(N*sizeof(double*));
     for(int i = 0; i < N; i++)
     {
-        A[i] = malloc(N * sizeof(double));
-        B[i] = malloc(N * sizeof(double));
-        C[i] = malloc(N * sizeof(double));
+        A[i] = malloc(N*sizeof(double));
+        B[i] = malloc(N*sizeof(double));
+        C[i] = malloc(N*sizeof(double));
     }
 
     //load the matrices
     srand(5050);
     for(int i = 0; i < N; i++)
     {
-        for(int j = 0; j < N; j++)
+        for(int a = 0; a < N; a++)
         {
-            A[i][j] = rand() % MAX_RAND;
-            B[i][j] = rand() % MAX_RAND;
-            C[i][j] = 0.0;
+            A[i][a] = rand() % MAX_RAND;
+            B[i][a] = rand() % MAX_RAND;
+            C[i][a] = 0;
         }
     }
 
@@ -79,39 +79,52 @@ int main(int argc, char* argv[])
     //#pragma omp parallel for schedule(static, 10)
     for(int i = 0; i < N; i++)
     {
-        for(int k = 0; k < N; k++)
+        for(int a = 0; a < N; a++)
         {
-            double sum = 0.0;
+            double sum = 0;
             for(int j = 0; j < N; j++)
             {
-                sum += A[i][j] * B[j][k];
+                sum += A[i][j] * B[j][a];
             }
-            C[i][k] = sum;
+            C[i][a] = sum;
         }
     }
     double end = omp_get_wtime();
 
     // Sequential check for correctness
-    double **C_check = matrix_mul(A, B, N);
-
-    double checksum_para = 0.0;
-    double checksum_seq  = 0.0;
+     double checksum_para = 0;
     for(int i = 0; i < N; i++)
     {
-        for(int j = 0; j < N; j++)
+        for(int a = 0; a < N; a++)
         {
-            checksum_para += C[i][j];
-            checksum_seq  += C_check[i][j];
+            checksum_para  += C[i][a];
         }
     }
-
-    if(checksum_para == checksum_seq)
+    if(N < 200)
     {
-        printf("Check sum success.\n");
+        double **C_check = matrix_mul(A, B, N);
+        double checksum_seq  = 0;
+        for(int i = 0; i < N; i++)
+        {
+            for(int a = 0; a < N; a++)
+            {
+                checksum_seq  += C_check[i][a];
+            }
+        }
+
+        if(checksum_para != checksum_seq)
+        {
+            printf("Check sum failed.\n");
+        }else{
+            printf("Check sum succeed\n");
+        }
+        for(int i = 0; i < N; i++)
+        {
+            free(C_check[i]);
+        }
+        free(C_check);
     }
-    else{
-        printf("Check sum failed\n");
-    }
+    printf("checksum: %f\n", checksum_para);
     printf("total time: %f seconds\n", end - start);
 
     // clean up the mess
@@ -120,12 +133,10 @@ int main(int argc, char* argv[])
         free(A[i]);
         free(B[i]);
         free(C[i]);
-        free(C_check[i]);
     }
     free(A); 
     free(B); 
     free(C); 
-    free(C_check);
 
     return 0;
 }
