@@ -16,10 +16,10 @@ def generate_nauty_format(graph, filename):
 # Generate different types of graphs
 
 # Random graph (Erdős-Rényi)
-n = 1000
+n = 1500
 p = 0.85  # edge probability
 g = nx.erdos_renyi_graph(n, p)
-generate_nauty_format(g, "random_1000_85.txt")
+generate_nauty_format(g, "random_1500_85.txt")
 
 # # Scale-free graph (Barabási-Albert)
 # n = 10000
