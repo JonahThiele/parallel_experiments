@@ -44,7 +44,7 @@ int main(int argc, char* argv[])
 
     omp_set_num_threads(n_threads);
 
-    //we need to print the number of threads
+    //we need to print the number of threads without this is just prints 1 no matter the output
     #pragma omp parallel
     {
         #pragma omp single
@@ -75,8 +75,8 @@ int main(int argc, char* argv[])
     }
 
     double start = omp_get_wtime();
-    #pragma omp parallel for schedule(dynamic, 4)
-    //#pragma omp parallel for schedule(static, 10)
+    #pragma omp parallel for schedule(dynamic, 4) shared(A, B, C)
+    //#pragma omp parallel for schedule(static, 10) shared(A, B, C)
     for(int i = 0; i < N; i++)
     {
         for(int a = 0; a < N; a++)

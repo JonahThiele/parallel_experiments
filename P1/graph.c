@@ -11,6 +11,7 @@ Graph* generate_graph(int v)
     {
         g->list[i] = NULL;
     }
+    return g;
 }
 
 //also sets the color because we load the full graph before running the algorithm
@@ -23,7 +24,7 @@ void add_edge(Graph* g, int a, int b)
         head->Color = 0;
         head->next = NULL;
         head->v = b;
-        head->nodes = 1;
+        head->nodes = 0;
         g->list[a] = head;
     }else{
         Node *cur = g->list[a];
@@ -48,7 +49,7 @@ void add_edge(Graph* g, int a, int b)
         head->Color = 0;
         head->next = NULL;
         head->v = a;
-        head->nodes = 1;
+        head->nodes = 0;
         g->list[b] = head;
 
     }else{
