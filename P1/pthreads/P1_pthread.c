@@ -3,8 +3,8 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
-#define THREADS 4
 //using xxhash64 instead of my own homemade hash because its used in literature
 //Here is where I got the hash function from https://github.com/stbrumme/xxhash
 
@@ -23,6 +23,10 @@ typedef struct {
     uint64_t *new_colors;
     //share the changed flag
     int *changed;
+    //share the iteration counter
+    int *iteration;
+    //share the changes counter
+    int *global_changes;
 } threadArgs;
 
 //so we can use acutal graphs instead of hardcoded ones 
@@ -55,8 +59,8 @@ Graph* load_graph_from_file(const char* filename, int* total_vertices) {
 //https://stackoverflow.com/questions/1787996/c-library-function-to-perform-sort
 int comp (const void * el, const void * el2)
 {
-     int left = *((int*)el);
-     int right = *((int*)el2);
+     uint64_t left = *((uint64_t*)el);
+     uint64_t right = *((uint64_t*)el2);
      if(left < right)
      {
           return -1;
@@ -65,7 +69,19 @@ int comp (const void * el, const void * el2)
      } else {
           return 0;
      }
+}
 
+typedef struct {
+    uint64_t hash;
+    int original_index;
+} HashIndex;
+
+int hash_index_comp(const void* a, const void* b) {
+    uint64_t ha = ((HashIndex*)a)->hash;
+    uint64_t hb = ((HashIndex*)b)->hash;
+    if(ha < hb) return -1;
+    if(ha > hb) return 1;
+    return 0;
 }
 
 void *color_refinement_partitioned(void * args)
@@ -82,17 +98,19 @@ void *color_refinement_partitioned(void * args)
           {
               pthread_mutex_lock(t_args->changed_mutex);
               *(t_args->changed) = 0;
+              *(t_args->global_changes) = 0;
+              (*(t_args->iteration))++;
               pthread_mutex_unlock(t_args->changed_mutex);
           }
           
           pthread_barrier_wait(t_args->barrier);
 
-          //clyclic allocation
+          //cyclic allocation
           for(int i = t_args->id; i < t_args->g_size; i += t_args->t_total)
           {  
             //we don't need mutexes because they are only reading these
             int neighbors = g->list[i]->nodes;
-            int *neighbor_colors = malloc(neighbors * sizeof(int));
+            uint64_t *neighbor_colors = malloc(neighbors * sizeof(uint64_t));
 
             Node *curr = g->list[i]->next;
             for(int a = 0; a < neighbors; a++)
@@ -100,17 +118,21 @@ void *color_refinement_partitioned(void * args)
                 //start off with the neighbor not the current one
                 neighbor_colors[a] = curr->Color;
                 curr = curr->next;
-                    
             }
 
             //sort so that different orientations don't give us incorrect or different hashes
-            qsort(neighbor_colors, neighbors, sizeof(int), comp);
+            qsort(neighbor_colors, neighbors, sizeof(uint64_t), comp);
             //api that I used for the hash
             //https://xxhash.com/doc/v0.8.3/group___x_x_h64__family.html#gadcfc7fb0e3382dc0b13afb125a0fea5c
                
             XXH64_state_t* state = XXH64_createState();
             XXH64_reset(state, 5050);
-            //what would the hash function need to be with refinement, I should look into various ones that might be useful
+            
+            //hash the current vertex color first (like MPI version)
+            uint64_t current_color = g->list[i]->Color;
+            XXH64_update(state, &current_color, sizeof(current_color));
+            
+            //hash all neighbor colors
             for(int b = 0; b < neighbors; b++)
             {
                 XXH64_update(state, &neighbor_colors[b], sizeof(neighbor_colors[b]));
@@ -120,60 +142,166 @@ void *color_refinement_partitioned(void * args)
             uint64_t hash = XXH64_digest(state);
             XXH64_freeState(state); 	
 
-            pthread_mutex_lock(t_args->changed_mutex);
             t_args->new_colors[i] = hash;
-            pthread_mutex_unlock(t_args->changed_mutex);
             
             free(neighbor_colors);
           }
 
-          uint64_t unique[t_args->g_size];
-          int unique_count = 0;
-
-          //simplify the colors to make it easier to handle
           pthread_barrier_wait(t_args->barrier);
-          //the cannonical color relabeling has to make the new and unique color list into shared memory
-          //More cyclic allocation
-          for(int a = t_args->id; a < t_args->g_size; a += t_args->t_total)
+          
+          //Use a single-threaded relabeling to ensure consistency
+          if(t_args->id == 0)
           {
-               int found = -1;
-               for(int j = 0; j < unique_count; j++)
-               {
-                    if(unique[j] == t_args->new_colors[a])
-                    {
-                        found = j;
-                        break;
-                    }
-               }
-               if(found == -1)
-               {
-                    unique[unique_count] = t_args->new_colors[a];
-                    found = unique_count;
-                    unique_count++;
-               }
-               //guess we only need one mutex because of the barriers, so we will just reuse it
-               pthread_mutex_lock(t_args->changed_mutex);
-               t_args->new_colors[a] = found;
-               pthread_mutex_unlock(t_args->changed_mutex);
+              //Debug: print first few hashes in first iteration
+              if(*(t_args->iteration) == 1)
+              {
+                  printf("DEBUG - First 10 hashes:\n");
+                  for(int i = 0; i < (t_args->g_size < 10 ? t_args->g_size : 10); i++)
+                  {
+                      printf("  Node %d: hash = %lu\n", i, t_args->new_colors[i]);
+                  }
+              }
+              
+              //SAVE the hashes before relabeling so we can check convergence
+              uint64_t* saved_hashes = malloc(t_args->g_size * sizeof(uint64_t));
+              for(int a = 0; a < t_args->g_size; a++)
+              {
+                  saved_hashes[a] = t_args->new_colors[a];
+              }
+              
+              //Create a mapping of hash -> color_id
+              HashIndex* hash_array = malloc(t_args->g_size * sizeof(HashIndex));
+              for(int a = 0; a < t_args->g_size; a++)
+              {
+                  hash_array[a].hash = t_args->new_colors[a];
+                  hash_array[a].original_index = a;
+              }
+              
+              //Sort by hash value
+              qsort(hash_array, t_args->g_size, sizeof(HashIndex), hash_index_comp);
+              
+              //Assign new color IDs: same hash gets same ID
+              uint64_t* temp_colors = malloc(t_args->g_size * sizeof(uint64_t));
+              int current_color = 0;
+              temp_colors[hash_array[0].original_index] = current_color;
+              
+              for(int a = 1; a < t_args->g_size; a++)
+              {
+                  if(hash_array[a].hash != hash_array[a-1].hash)
+                  {
+                      current_color++;
+                  }
+                  temp_colors[hash_array[a].original_index] = current_color;
+              }
+              
+              //Debug: print color distribution
+              if(*(t_args->iteration) <= 3)
+              {
+                  printf("DEBUG - Unique colors after relabeling: %d\n", current_color + 1);
+                  
+                  //Check how many unique OLD colors we had
+                  int old_unique = 0;
+                  uint64_t old_colors_sorted[t_args->g_size];
+                  for(int i = 0; i < t_args->g_size; i++)
+                  {
+                      old_colors_sorted[i] = g->list[i]->Color;
+                  }
+                  qsort(old_colors_sorted, t_args->g_size, sizeof(uint64_t), comp);
+                  old_unique = 1;
+                  for(int i = 1; i < t_args->g_size; i++)
+                  {
+                      if(old_colors_sorted[i] != old_colors_sorted[i-1])
+                      {
+                          old_unique++;
+                      }
+                  }
+                  printf("DEBUG - Unique colors BEFORE this round: %d\n", old_unique);
+              }
+              
+              //Copy back to new_colors
+              for(int a = 0; a < t_args->g_size; a++)
+              {
+                  t_args->new_colors[a] = temp_colors[a];
+              }
+              
+              //NOW check for convergence by comparing the saved hashes
+              //If the hashes we just computed match what we'd compute from current colors,
+              //then we've converged
+              *(t_args->changed) = 0;  //assume no change
+              for(int i = 0; i < t_args->g_size; i++)
+              {
+                  //Compute hash from CURRENT color assignment
+                  XXH64_state_t* state = XXH64_createState();
+                  XXH64_reset(state, 5050);
+                  
+                  uint64_t curr_color = g->list[i]->Color;
+                  XXH64_update(state, &curr_color, sizeof(curr_color));
+                  
+                  int neighbors = g->list[i]->nodes;
+                  uint64_t *neighbor_colors = malloc(neighbors * sizeof(uint64_t));
+                  Node *curr = g->list[i]->next;
+                  for(int a = 0; a < neighbors; a++)
+                  {
+                      neighbor_colors[a] = curr->Color;
+                      curr = curr->next;
+                  }
+                  qsort(neighbor_colors, neighbors, sizeof(uint64_t), comp);
+                  
+                  for(int b = 0; b < neighbors; b++)
+                  {
+                      XXH64_update(state, &neighbor_colors[b], sizeof(neighbor_colors[b]));
+                  }
+                  
+                  uint64_t current_hash = XXH64_digest(state);
+                  XXH64_freeState(state);
+                  free(neighbor_colors);
+                  
+                  //If this hash differs from the saved hash, partition changed
+                  if(current_hash != saved_hashes[i])
+                  {
+                      *(t_args->changed) = 1;
+                      break;  //At least one changed, that's enough
+                  }
+              }
+              
+              free(hash_array);
+              free(temp_colors);
+              free(saved_hashes);
           }
 
           //check if the colors have stabilized/not changed since the last round
           pthread_barrier_wait(t_args->barrier);
-          //more cyclic allocation
+          
+          //Update colors even if converged (for final state)
           for(int b = t_args->id; b < t_args->g_size; b += t_args->t_total)
           {
-               if (g->list[b]->Color != t_args->new_colors[b])
-               {
-                    //update the actual graph colors
-                    pthread_mutex_lock(t_args->changed_mutex);
-                    //should I wrap these in two separate mutexes
-                    g->list[b]->Color = t_args->new_colors[b];
-                    *(t_args->changed) = 1;
-                    pthread_mutex_unlock(t_args->changed_mutex);
-               }
+               g->list[b]->Color = t_args->new_colors[b];
           }
           
-          //synchronize to read the changed flag
+          *(t_args->global_changes) = *(t_args->changed) ? 1 : 0;  //Just track if ANY change
+          
+          //accumulate total changes
+          pthread_barrier_wait(t_args->barrier);
+          
+          //thread 0 prints the iteration info
+          if(t_args->id == 0)
+          {
+              printf("Round %d: %s\n", *(t_args->iteration), *(t_args->changed) ? "partition changed" : "CONVERGED");
+              
+              //Debug: show first few node colors for first few iterations
+              if(*(t_args->iteration) <= 3)
+              {
+                  printf("  First 10 node colors: ");
+                  for(int i = 0; i < (t_args->g_size < 10 ? t_args->g_size : 10); i++)
+                  {
+                      printf("%lu ", g->list[i]->Color);
+                  }
+                  printf("\n");
+              }
+              
+              fflush(stdout);
+          }
+          
           pthread_barrier_wait(t_args->barrier);
           local_changed = *(t_args->changed);
     }
@@ -185,6 +313,12 @@ void *color_refinement_partitioned(void * args)
 
 uint64_t * color_refinement(Graph *g, int size,  int threads)
 {
+    //initialize all colors to 0
+    for(int i = 0; i < size; i++)
+    {
+        g->list[i]->Color = 0;
+    }
+    
     //initialize the threads
     pthread_t threadlist[threads];
     pthread_mutex_t changed_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -193,6 +327,8 @@ uint64_t * color_refinement(Graph *g, int size,  int threads)
     pthread_barrier_init(&barrier, NULL, threads);
     uint64_t *new_colors = malloc(sizeof(uint64_t) * size);
     int changed = 1;
+    int iteration = 0;
+    int global_changes = 0;
     
     //allocate thread args in heap so they persist
     threadArgs *args_array = malloc(sizeof(threadArgs) * threads);
@@ -208,6 +344,8 @@ uint64_t * color_refinement(Graph *g, int size,  int threads)
         args_array[i].barrier = &barrier;
         args_array[i].new_colors = new_colors;
         args_array[i].changed = &changed;
+        args_array[i].iteration = &iteration;
+        args_array[i].global_changes = &global_changes;
         pthread_create(&threadlist[i], NULL, color_refinement_partitioned, (void *)&args_array[i]);
     }
 
@@ -216,6 +354,49 @@ uint64_t * color_refinement(Graph *g, int size,  int threads)
     {
         pthread_join(threadlist[i], NULL);
     }
+
+    printf("Converged after %d rounds\n", iteration);
+    
+    // debug final color labels for graph
+    int color_count = 0;
+    uint64_t* unique_colors = malloc(size * sizeof(uint64_t));
+    int* counts = malloc(size * sizeof(int));
+
+    for(int i = 0; i < size; i++)
+    {
+        counts[i] = 0;
+    }
+    
+    for (int i = 0; i < size; i++) 
+    {
+        int found = -1;
+        for (int a = 0; a < color_count; a++) 
+        {
+            if (unique_colors[a] == g->list[i]->Color) 
+            {
+                found = a;
+                break;
+            }
+        }
+        if (found == -1) 
+        {
+            unique_colors[color_count] = g->list[i]->Color;
+            counts[color_count] = 1;
+            color_count++;
+        } else {
+            counts[found]++;
+        }
+    }
+    
+    printf("colors for vertices:\n");
+    for (int i = 0; i < color_count; i++) 
+    {
+        printf("  Color %lu: %d vertices\n", unique_colors[i], counts[i]);
+    }
+    
+    //clean up for 
+    free(unique_colors);
+    free(counts);
 
     pthread_barrier_destroy(&barrier);
     pthread_mutex_destroy(&changed_mutex);
@@ -255,10 +436,22 @@ int main(int argc, char*argv[])
     //G1
     int g1_nodes = 0;
     Graph *g1 = load_graph_from_file(filename_g1, &g1_nodes);
+    
+    if (!g1) {
+        fprintf(stderr, "Error loading graph from %s\n", filename_g1);
+        return 1;
+    }
+    printf("Graph 1\n");
+    fflush(stdout);
 
     //G2 because we need to compare to the other one for it to work
     int g2_nodes = 0;
     Graph *g2 = load_graph_from_file(filename_g2, &g2_nodes);
+    
+    if (!g2) {
+        fprintf(stderr, "Error loading graph from %s\n", filename_g2);
+        return 1;
+    }
 
     //link to reference I used to write the timing code
     //https://thelinuxcode.com/clock-gettime-c-function/
@@ -273,8 +466,10 @@ int main(int argc, char*argv[])
 
     clock_gettime(CLOCK_MONOTONIC, &current_g1);
     
+    printf("\nGraph 2\n");
+    fflush(stdout);
     
-    //timing for the secong graph
+    //timing for the second graph
     struct timespec start_g2;
 
     clock_gettime(CLOCK_MONOTONIC, &start_g2);
@@ -285,7 +480,7 @@ int main(int argc, char*argv[])
     clock_gettime(CLOCK_MONOTONIC, &current_g2);
 
     int same = 1;
-    for(int i = 0; i < 10; i++)
+    for(int i = 0; i < g1_nodes; i++)
     {
           //its not possible for them to be the same graph
           if(colors1[i] != colors2[i])
@@ -302,21 +497,23 @@ int main(int argc, char*argv[])
      printf("These two graphs can not possibly be the same graphs\n");
     }
 
-    //printing out elasped times
+    //printing out elapsed times
     double elapsed_g1 = current_g1.tv_sec - start_g1.tv_sec;
     elapsed_g1 += (current_g1.tv_nsec - start_g1.tv_nsec) / 1000000000.0;
     
-    printf("elasped time for first graph is: %f secs\n", elapsed_g1);
+    printf("elapsed time for first graph is: %f secs\n", elapsed_g1);
 
     double elapsed_g2 = current_g2.tv_sec - start_g2.tv_sec;
     elapsed_g2 += (current_g2.tv_nsec - start_g2.tv_nsec) / 1000000000.0;
 
-    printf("elasped time for the second graph is: %f secs\n", elapsed_g2);
+    printf("elapsed time for the second graph is: %f secs\n", elapsed_g2);
 
-    printf("total elasped time for both graphs is: %f secs\n", elapsed_g2 + elapsed_g1);
+    printf("total elapsed time for both graphs is: %f secs\n", elapsed_g2 + elapsed_g1);
 
     free(colors1);
     free(colors2);
+    free(filename_g1);
+    free(filename_g2);
     //should also free graphs here
 
     return 0;

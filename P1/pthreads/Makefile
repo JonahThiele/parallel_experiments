@@ -1,17 +1,10 @@
 CC      = gcc
-# we always add debuggers in this household
-CFLAGS  = -std=c11 -g -pthread
-
-SRC     = P1_pthreads.c ../graph.c ../xxhash.c
-OBJ     = $(SRC:.c=.o)
-
+CFLAGS  =  -g -pthread
+SRC     = ./P1_pthread.c ../graph.c ../xxhash.c
 TARGET  = color_refinement_pthreads
 
-$(TARGET): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ)
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) -o $@ $(SRC)
 
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(TARGET)
