@@ -1,6 +1,6 @@
 CC      = gcc
 # we always add debugging flags in this household
-CFLAGS  = -Wall -std=c11 -g
+CFLAGS  = -Wall -g
 
 SRC     = P1.c ../graph.c ../xxhash.c
 OBJ     = $(SRC:.c=.o)
