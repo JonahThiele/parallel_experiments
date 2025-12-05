@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
+#include <string.h>
 
 //using xxhash64 instead of my own homemade hash because its used in literature
 //Here is where I got the hash function from https://github.com/stbrumme/xxhash
@@ -58,9 +59,11 @@ uint64_t * color_refinement(Graph *g, int size)
 
     //start algorithm
     int changed = 1;
+    int iteration = 0;
     while(changed)
     {
           changed = 0;
+          iteration++;
 
           //go through every node
           for(int i = 0; i < size; i++)
@@ -122,15 +125,62 @@ uint64_t * color_refinement(Graph *g, int size)
                new_colors[a] = found;
           }
 
+          int nodes_changed = 0;
           for(int b = 0; b < size; b++)
           {
                if (g->list[b]->Color != new_colors[b])
                {
                     g->list[b]->Color = new_colors[b];
                     changed = 1;
+                    nodes_changed++;
                }
           }
+          
     }
+    
+    printf("Converged after %d round\n", iteration);
+    
+    // debug final color labels for graph
+    int color_count = 0;
+    uint64_t* unique_colors = malloc(size * sizeof(uint64_t));
+    int* counts = malloc(size * sizeof(int));
+
+    for(int i = 0; i < size; i++)
+    {
+        counts[i] = 0;
+    }
+    
+    for (int i = 0; i < size; i++) 
+    {
+        int found = -1;
+        for (int a = 0; a < color_count; a++) 
+        {
+            if (unique_colors[a] == g->list[i]->Color) 
+            {
+                found = a;
+                break;
+            }
+        }
+        if (found == -1) 
+        {
+            unique_colors[color_count] = g->list[i]->Color;
+            counts[color_count] = 1;
+            color_count++;
+        } else {
+            counts[found]++;
+        }
+    }
+    
+    printf("colors for vertices:\n");
+    for (int i = 0; i < color_count; i++) 
+    {
+        printf("  Color %lu: %d vertex\n", unique_colors[i], counts[i]);
+    }
+    
+    //clean up for 
+    free(unique_colors);
+    free(counts);
+    
     return new_colors;
 
 }
@@ -160,15 +210,25 @@ int main(int argc, char **argv)
     }
     filename_g2[g2_len] = '\0';
 
-    int threads = atoi(argv[2]);
-
     //G1
     int g1_nodes = 0;
     Graph *g1 = load_graph_from_file(filename_g1, &g1_nodes);
+    
+    if (!g1) {
+        fprintf(stderr, "Error loading graph from %s\n", filename_g1);
+        return 1;
+    }
+    printf("Graph 1\n");
+    fflush(stdout);
 
     //G2 because we need to compare to the other one for it to work
     int g2_nodes = 0;
     Graph *g2 = load_graph_from_file(filename_g2, &g2_nodes);
+    
+    if (!g2) {
+        fprintf(stderr, "Error loading graph from %s\n", filename_g2);
+        return 1;
+    }
 
     
     //timing for graph 1
@@ -180,6 +240,9 @@ int main(int argc, char **argv)
     struct timespec current_g1;  
 
     clock_gettime(CLOCK_MONOTONIC, &current_g1);
+    
+    printf("\nGraph 2\n");
+    fflush(stdout);
     
     //timing for graph 2
     struct timespec start_g2;
@@ -197,6 +260,7 @@ int main(int argc, char **argv)
           //its not possible for them to be the same graph
           if(colors1[i] != colors2[i])
           {
+               same = 0;
                break;
           }
     }
@@ -205,21 +269,27 @@ int main(int argc, char **argv)
     {
       printf("They are likely isomorphic graphs\n");
     }else{
-     printf("Thess two graphs can not possibly be the same graphs\n");
+     printf("These two graphs can not possibly be the same graphs\n");
     }
     
     //printing out elasped times
     double elapsed_g1 = current_g1.tv_sec - start_g1.tv_sec;
     elapsed_g1 += (current_g1.tv_nsec - start_g1.tv_nsec) / 1000000000.0;
     
-    printf("elasped time for first graph is: %f secs\n", elapsed_g1);
+    printf("The elasped time for graph1 is: %f secs\n", elapsed_g1);
 
     double elapsed_g2 = current_g2.tv_sec - start_g2.tv_sec;
     elapsed_g2 += (current_g2.tv_nsec - start_g2.tv_nsec) / 1000000000.0;
 
-    printf("elasped time for the second graph is: %f secs\n", elapsed_g2);
+    printf("The elasped time for graph2 is: %f secs\n", elapsed_g2);
 
-    printf("total elasped time for both graphs is: %f secs\n", elapsed_g2 + elapsed_g1);
+    printf("total sequential elasped time for program: %f secs\n", elapsed_g2 + elapsed_g1);
+    
+    free(colors1);
+    free(colors2);
+    free(filename_g1);
+    free(filename_g2);
+    //should also free graphs here
 
     return 0;
 }
