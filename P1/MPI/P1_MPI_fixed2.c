@@ -14,6 +14,11 @@ typedef struct LocalNode{
     int neighbor_count;
 } LocalNode;
 
+typedef struct {
+    uint32_t hash;
+    int original_index;
+} HashIndex;
+
 // Determine which id the vertex
 int get_owner(int vertex, int verticies, int p) {
     int chunk_size = verticies / p;
@@ -60,6 +65,14 @@ int cmp(const void* a, const void* b) {
         return 1;
     }
 
+    return 0;
+}
+
+int hash_index_cmp(const void* a, const void* b) {
+    uint32_t ha = ((HashIndex*)a)->hash;
+    uint32_t hb = ((HashIndex*)b)->hash;
+    if(ha < hb) return -1;
+    if(ha > hb) return 1;
     return 0;
 }
 
@@ -293,35 +306,47 @@ uint32_t* color_refinement_mpi(Graph* g, int total_verticies, int id, int p) {
         free(recvcounts);
         free(recvdispls);
         
-        // relabel the colors with a smaller number so it is easier to work with
-        uint32_t* unique = malloc(total_verticies * sizeof(uint32_t));
-        int unique_count = 0;
-        
-        //
+        // SAVE the hashes BEFORE relabeling for convergence check
+        uint32_t* saved_hashes = malloc(total_verticies * sizeof(uint32_t));
         for (int a = 0; a < total_verticies; a++) 
         {
-            int found = -1;
-            //check the unique colors and see if the hashed color already has a compressed color associated 
-            for (int b = 0; b < unique_count; b++) 
-            {
-                //give it that associated color
-                if (unique[b] == global_colors[a]) 
-                {
-                    found = b;
-                    break;
-                }
-            }
-            //give it the next number as a compressed number
-            if (found == -1) 
-            {
-                unique[unique_count] = global_colors[a];
-                found = unique_count;
-                unique_count++;
-            }
-            global_colors[a] = found;
+            saved_hashes[a] = global_colors[a];
         }
         
-        free(unique);
+        // relabel the colors with a smaller number so it is easier to work with
+        // CREATE HASH-INDEX PAIRS
+        HashIndex* hash_array = malloc(total_verticies * sizeof(HashIndex));
+        for (int a = 0; a < total_verticies; a++) 
+        {
+            hash_array[a].hash = global_colors[a];
+            hash_array[a].original_index = a;
+        }
+        
+        // SORT BY HASH VALUE
+        qsort(hash_array, total_verticies, sizeof(HashIndex), hash_index_cmp);
+        
+        // ASSIGN COLOR IDS: same hash gets same ID
+        uint32_t* temp_colors = malloc(total_verticies * sizeof(uint32_t));
+        int current_color = 0;
+        temp_colors[hash_array[0].original_index] = current_color;
+        
+        for (int a = 1; a < total_verticies; a++) 
+        {
+            if (hash_array[a].hash != hash_array[a-1].hash) 
+            {
+                current_color++;
+            }
+            temp_colors[hash_array[a].original_index] = current_color;
+        }
+        
+        // Copy back to global_colors
+        for (int a = 0; a < total_verticies; a++) 
+        {
+            global_colors[a] = temp_colors[a];
+        }
+        
+        free(hash_array);
+        free(temp_colors);
         
         // Update local node colors with new compressed colors
         for (int i = 0; i < chunk_size; i++) 
@@ -329,23 +354,54 @@ uint32_t* color_refinement_mpi(Graph* g, int total_verticies, int id, int p) {
             local_verticies[i].color = global_colors[local_verticies[i].id];
         }
         
-        // Count verticies changed
-        int local_changes = 0;
+        // Check convergence by comparing saved hashes with what we'd compute from OLD colors
+        // This tells us if the partition actually refined or stayed the same
+        int local_changed = 0;
         for (int i = 0; i < chunk_size; i++) 
         {
-            if (old_global_colors[local_verticies[i].id] != global_colors[local_verticies[i].id]) 
+            int global_id = local_verticies[i].id;
+            
+            // Compute what the hash WOULD be using the OLD colors
+            XXH32_state_t* state = XXH32_createState();
+            XXH32_reset(state, 5050);
+            
+            uint32_t old_color = old_global_colors[global_id];
+            XXH32_update(state, &old_color, sizeof(old_color));
+            
+            // Get neighbor colors from OLD state
+            uint32_t* old_neighbor_colors = malloc(local_verticies[i].neighbor_count * sizeof(uint32_t));
+            for (int a = 0; a < local_verticies[i].neighbor_count; a++) 
             {
-                local_changes++;
+                old_neighbor_colors[a] = old_global_colors[local_verticies[i].neighbors[a]];
+            }
+            qsort(old_neighbor_colors, local_verticies[i].neighbor_count, sizeof(uint32_t), cmp);
+            
+            for (int a = 0; a < local_verticies[i].neighbor_count; a++) 
+            {
+                XXH32_update(state, &old_neighbor_colors[a], sizeof(old_neighbor_colors[a]));
+            }
+            
+            uint32_t old_hash = XXH32_digest(state);
+            XXH32_freeState(state);
+            free(old_neighbor_colors);
+            
+            // Compare: did this node's hash change from what it would have been?
+            if (old_hash != saved_hashes[global_id]) 
+            {
+                local_changed = 1;
+                break;  // At least one changed, that's enough
             }
         }
         
+        free(saved_hashes);
+        
         int global_changes = 0;
         //if converged this will return zero
-        MPI_Allreduce(&local_changes, &global_changes, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&local_changed, &global_changes, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
         
         if (id == 0) 
         {
-            printf("Round %d: %d nodes changed globally\n", iteration, global_changes);
+            printf("Round %d: %s\n", iteration, global_changes ? "partition changed" : "CONVERGED");
         }
         
         //we are done

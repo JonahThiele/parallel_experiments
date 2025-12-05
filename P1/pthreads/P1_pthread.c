@@ -152,15 +152,6 @@ void *color_refinement_partitioned(void * args)
           //Use a single-threaded relabeling to ensure consistency
           if(t_args->id == 0)
           {
-              //Debug: print first few hashes in first iteration
-              if(*(t_args->iteration) == 1)
-              {
-                  printf("DEBUG - First 10 hashes:\n");
-                  for(int i = 0; i < (t_args->g_size < 10 ? t_args->g_size : 10); i++)
-                  {
-                      printf("  Node %d: hash = %lu\n", i, t_args->new_colors[i]);
-                  }
-              }
               
               //SAVE the hashes before relabeling so we can check convergence
               uint64_t* saved_hashes = malloc(t_args->g_size * sizeof(uint64_t));
@@ -195,28 +186,26 @@ void *color_refinement_partitioned(void * args)
               }
               
               //Debug: print color distribution
-              if(*(t_args->iteration) <= 3)
-              {
-                  printf("DEBUG - Unique colors after relabeling: %d\n", current_color + 1);
+            //   if(*(t_args->iteration) <= 3)
+            //   {
                   
-                  //Check how many unique OLD colors we had
-                  int old_unique = 0;
-                  uint64_t old_colors_sorted[t_args->g_size];
-                  for(int i = 0; i < t_args->g_size; i++)
-                  {
-                      old_colors_sorted[i] = g->list[i]->Color;
-                  }
-                  qsort(old_colors_sorted, t_args->g_size, sizeof(uint64_t), comp);
-                  old_unique = 1;
-                  for(int i = 1; i < t_args->g_size; i++)
-                  {
-                      if(old_colors_sorted[i] != old_colors_sorted[i-1])
-                      {
-                          old_unique++;
-                      }
-                  }
-                  printf("DEBUG - Unique colors BEFORE this round: %d\n", old_unique);
-              }
+            //       //Check how many unique OLD colors we had
+            //       int old_unique = 0;
+            //       uint64_t old_colors_sorted[t_args->g_size];
+            //       for(int i = 0; i < t_args->g_size; i++)
+            //       {
+            //           old_colors_sorted[i] = g->list[i]->Color;
+            //       }
+            //       qsort(old_colors_sorted, t_args->g_size, sizeof(uint64_t), comp);
+            //       old_unique = 1;
+            //       for(int i = 1; i < t_args->g_size; i++)
+            //       {
+            //           if(old_colors_sorted[i] != old_colors_sorted[i-1])
+            //           {
+            //               old_unique++;
+            //           }
+            //       }
+            //   }
               
               //Copy back to new_colors
               for(int a = 0; a < t_args->g_size; a++)
@@ -286,18 +275,18 @@ void *color_refinement_partitioned(void * args)
           //thread 0 prints the iteration info
           if(t_args->id == 0)
           {
-              printf("Round %d: %s\n", *(t_args->iteration), *(t_args->changed) ? "partition changed" : "CONVERGED");
+    
               
               //Debug: show first few node colors for first few iterations
-              if(*(t_args->iteration) <= 3)
-              {
-                  printf("  First 10 node colors: ");
-                  for(int i = 0; i < (t_args->g_size < 10 ? t_args->g_size : 10); i++)
-                  {
-                      printf("%lu ", g->list[i]->Color);
-                  }
-                  printf("\n");
-              }
+            //   if(*(t_args->iteration) <= 3)
+            //   {
+            //     //   printf("  First 10 node colors: ");
+            //     //   for(int i = 0; i < (t_args->g_size < 10 ? t_args->g_size : 10); i++)
+            //     //   {
+            //     //       printf("%lu ", g->list[i]->Color);
+            //     //   }
+            //     //   printf("\n");
+            //   }
               
               fflush(stdout);
           }
