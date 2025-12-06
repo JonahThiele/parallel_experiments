@@ -32,16 +32,6 @@ typedef struct {
 //so we can use acutal graphs instead of hardcoded ones 
 Graph* load_graph_from_file(const char* filename, int* total_vertices) {
     FILE* file = fopen(filename, "r");
-    if (!file) {
-        fprintf(stderr, "Error: Could not open file %s\n", filename);
-        return NULL;
-    }
-    
-    if (fscanf(file, "%d", total_vertices) != 1) {
-        fprintf(stderr, "Error: Could not read vertex count\n");
-        fclose(file);
-        return NULL;
-    }
     
     Graph* g = generate_graph(*total_vertices);
     
@@ -71,6 +61,7 @@ int comp (const void * el, const void * el2)
      }
 }
 
+//for cannoical graph relabeling
 typedef struct {
     uint64_t hash;
     int original_index;
@@ -79,11 +70,18 @@ typedef struct {
 int hash_index_comp(const void* a, const void* b) {
     uint64_t ha = ((HashIndex*)a)->hash;
     uint64_t hb = ((HashIndex*)b)->hash;
-    if(ha < hb) return -1;
-    if(ha > hb) return 1;
+    if(ha < hb) 
+    {
+        return -1;
+    }
+    if(ha > hb)
+    {
+        return 1;
+    }
     return 0;
 }
 
+//given to each threads
 void *color_refinement_partitioned(void * args)
 {
     threadArgs* t_args = (threadArgs*)args;
@@ -185,41 +183,17 @@ void *color_refinement_partitioned(void * args)
                   temp_colors[hash_array[a].original_index] = current_color;
               }
               
-              //Debug: print color distribution
-            //   if(*(t_args->iteration) <= 3)
-            //   {
-                  
-            //       //Check how many unique OLD colors we had
-            //       int old_unique = 0;
-            //       uint64_t old_colors_sorted[t_args->g_size];
-            //       for(int i = 0; i < t_args->g_size; i++)
-            //       {
-            //           old_colors_sorted[i] = g->list[i]->Color;
-            //       }
-            //       qsort(old_colors_sorted, t_args->g_size, sizeof(uint64_t), comp);
-            //       old_unique = 1;
-            //       for(int i = 1; i < t_args->g_size; i++)
-            //       {
-            //           if(old_colors_sorted[i] != old_colors_sorted[i-1])
-            //           {
-            //               old_unique++;
-            //           }
-            //       }
-            //   }
-              
-              //Copy back to new_colors
+              //update the colors 
               for(int a = 0; a < t_args->g_size; a++)
               {
                   t_args->new_colors[a] = temp_colors[a];
               }
               
-              //NOW check for convergence by comparing the saved hashes
-              //If the hashes we just computed match what we'd compute from current colors,
-              //then we've converged
-              *(t_args->changed) = 0;  //assume no change
+              //check for stabilized colors by comparing the hash values
+              *(t_args->changed) = 0;  
               for(int i = 0; i < t_args->g_size; i++)
               {
-                  //Compute hash from CURRENT color assignment
+                  //Compute hash from most recent state of 
                   XXH64_state_t* state = XXH64_createState();
                   XXH64_reset(state, 5050);
                   
@@ -245,11 +219,11 @@ void *color_refinement_partitioned(void * args)
                   XXH64_freeState(state);
                   free(neighbor_colors);
                   
-                  //If this hash differs from the saved hash, partition changed
+                  //If this hash differs from the saved hash, it didn't converge 
                   if(current_hash != saved_hashes[i])
                   {
                       *(t_args->changed) = 1;
-                      break;  //At least one changed, that's enough
+                      break;  //At least one vertex changed
                   }
               }
               
@@ -258,39 +232,17 @@ void *color_refinement_partitioned(void * args)
               free(saved_hashes);
           }
 
-          //check if the colors have stabilized/not changed since the last round
           pthread_barrier_wait(t_args->barrier);
           
-          //Update colors even if converged (for final state)
+          //Update the colors for the graph structure
           for(int b = t_args->id; b < t_args->g_size; b += t_args->t_total)
           {
                g->list[b]->Color = t_args->new_colors[b];
           }
           
-          *(t_args->global_changes) = *(t_args->changed) ? 1 : 0;  //Just track if ANY change
+          *(t_args->global_changes) = *(t_args->changed) ? 1 : 0;
           
-          //accumulate total changes
-          pthread_barrier_wait(t_args->barrier);
-          
-          //thread 0 prints the iteration info
-          if(t_args->id == 0)
-          {
-    
-              
-              //Debug: show first few node colors for first few iterations
-            //   if(*(t_args->iteration) <= 3)
-            //   {
-            //     //   printf("  First 10 node colors: ");
-            //     //   for(int i = 0; i < (t_args->g_size < 10 ? t_args->g_size : 10); i++)
-            //     //   {
-            //     //       printf("%lu ", g->list[i]->Color);
-            //     //   }
-            //     //   printf("\n");
-            //   }
-              
-              fflush(stdout);
-          }
-          
+          //update changed together
           pthread_barrier_wait(t_args->barrier);
           local_changed = *(t_args->changed);
     }
@@ -299,7 +251,7 @@ void *color_refinement_partitioned(void * args)
 }
 
 
-
+//the pthread wrapper setting up everything
 uint64_t * color_refinement(Graph *g, int size,  int threads)
 {
     //initialize all colors to 0
@@ -308,7 +260,7 @@ uint64_t * color_refinement(Graph *g, int size,  int threads)
         g->list[i]->Color = 0;
     }
     
-    //initialize the threads
+    //initialize the threads and the constructs they need 
     pthread_t threadlist[threads];
     pthread_mutex_t changed_mutex = PTHREAD_MUTEX_INITIALIZER;
     pthread_barrier_t barrier;
@@ -319,10 +271,9 @@ uint64_t * color_refinement(Graph *g, int size,  int threads)
     int iteration = 0;
     int global_changes = 0;
     
-    //allocate thread args in heap so they persist
     threadArgs *args_array = malloc(sizeof(threadArgs) * threads);
 
-    //give each thread a couple nodes
+    //give each thread a couple vertex in classic cyclic fashion
     for(int i = 0; i < threads; i++)
     {
         args_array[i].g = g;
@@ -351,11 +302,13 @@ uint64_t * color_refinement(Graph *g, int size,  int threads)
     uint64_t* unique_colors = malloc(size * sizeof(uint64_t));
     int* counts = malloc(size * sizeof(int));
 
+    //again should have used calloc
     for(int i = 0; i < size; i++)
     {
         counts[i] = 0;
     }
     
+    //generate a frequency list of the the relabeled colors
     for (int i = 0; i < size; i++) 
     {
         int found = -1;
@@ -396,7 +349,7 @@ uint64_t * color_refinement(Graph *g, int size,  int threads)
 
 int main(int argc, char*argv[])
 {
-    
+    //load the files and the number of threads as arguments
     if(argc < 4)
     {
         printf("Enter the file of the graphs and amount of threads\n");

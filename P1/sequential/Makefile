@@ -1,5 +1,5 @@
 CC      = gcc
-# we always add debugging flags in this household
+# we always add debugging flags
 CFLAGS  = -Wall -g
 
 SRC     = P1.c ../graph.c ../xxhash.c

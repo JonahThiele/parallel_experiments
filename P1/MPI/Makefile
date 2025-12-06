@@ -1,7 +1,7 @@
 CC      = mpicc
 CFLAGS  = -Wall -std=c11
 
-SRC_CPP = P1_MPI_fixed2.c
+SRC_CPP = P1_MPI.c
 SRC_C   = ../graph.c ../xxhash.c
 
 OBJ_CPP = $(SRC_CPP:.cpp=.o)
@@ -18,7 +18,6 @@ $(TARGET): $(OBJ)
 %.o: %.cpp
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Rule for C files (compile as C!)
 %.o: %.c
 	mpicc -Wall -std=c11 -c $< -o $@
 
